@@ -929,6 +929,31 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
     def test_eliminate_subqueries(self):
         self.check_file("eliminate_subqueries", optimizer.eliminate_subqueries.eliminate_subqueries)
 
+    def test_fingerprint(self):
+        from sqlglot.optimizer.fingerprint import fingerprint
+
+        self.check_file("fingerprint", fingerprint, schema=self.schema)
+
+        # Structurally equivalent queries over different tables should produce the same fingerprint
+        fp_a = fingerprint(
+            parse_one("SELECT id, name FROM users WHERE id > 5"),
+            schema={"users": {"id": "INT", "name": "TEXT"}},
+        )
+        fp_b = fingerprint(
+            parse_one("SELECT emp_id, full_name FROM employees WHERE emp_id > 5"),
+            schema={"employees": {"emp_id": "INT", "full_name": "TEXT"}},
+        )
+        self.assertEqual(fp_a.sql(), fp_b.sql())
+
+        # Physical table identity is preserved for real tables (only alias is canonicalized)
+        fp = fingerprint(
+            parse_one("SELECT a FROM x"),
+            schema={"x": {"a": "INT"}},
+            db="mydb",
+            catalog="cat",
+        )
+        self.assertEqual(fp.sql(), "SELECT _t0._c0 AS _c0 FROM cat.mydb.x AS _t0")
+
     def test_canonicalize(self):
         optimize = partial(
             optimizer.optimize,
