@@ -2206,7 +2206,7 @@ class TestSnowflake(Validator):
                 "spark2": "UUID()",
                 "spark": "UUID()",
                 "databricks": "UUID()",
-                "duckdb": "UUID()",
+                "duckdb": UnsupportedError,
                 "presto": "UUID()",
                 "trino": "UUID()",
                 "postgres": "GEN_RANDOM_UUID()",
