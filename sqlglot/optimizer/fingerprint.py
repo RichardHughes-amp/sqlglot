@@ -40,12 +40,12 @@ def fingerprint(
         **qualify_kwargs: Additional keyword arguments passed to qualify().
 
     Returns:
-        A deep copy of the expression with all identifiers replaced by canonical names.
+        The expression with all identifiers replaced by canonical names.
     """
     expression = t.cast(
         "E",
         qualify(
-            expression.copy(),
+            expression,
             dialect=dialect,
             schema=schema,
             quote_identifiers=False,
@@ -142,5 +142,27 @@ def fingerprint(
         for col in find_all_in_scope(scope.expression, exp.Column):
             if not col.table and col.name in output_map:
                 col.this.set("this", output_map[col.name])
+
+        # For UNION BY NAME, align canonical column names across branches so that columns
+        # with matching original aliases end up with the same canonical name. Without this,
+        # `SELECT a FROM x UNION BY NAME SELECT a FROM y` and `... UNION BY NAME SELECT b FROM y`
+        # produce the same fingerprint despite having different semantics.
+        if isinstance(scope.expression, exp.SetOperation) and scope.expression.args.get("by_name"):
+            left_scope, right_scope = scope.union_scopes
+            left_out = scope_outputs.get(id(left_scope), {})
+            right_out = scope_outputs.get(id(right_scope), {})
+
+            rename: dict[str, str] = {}
+            for orig_name, left_canon in left_out.items():
+                right_canon = right_out.get(orig_name)
+                if right_canon and right_canon != left_canon:
+                    rename[right_canon] = left_canon
+
+            if rename:
+                for node in right_scope.expression.walk():
+                    if isinstance(node, exp.Identifier) and node.name in rename:
+                        node.set("this", rename[node.name])
+
+                scope_outputs[id(right_scope)] = {k: rename.get(v, v) for k, v in right_out.items()}
 
     return expression

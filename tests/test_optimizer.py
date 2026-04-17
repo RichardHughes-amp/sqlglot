@@ -932,7 +932,8 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
     def test_fingerprint(self):
         from sqlglot.optimizer.fingerprint import fingerprint
 
-        self.check_file("fingerprint", fingerprint, schema=self.schema)
+        schema = {**self.schema, "jtbl": {"j": "JSON"}}
+        self.check_file("fingerprint", fingerprint, schema=schema)
 
         # Structurally equivalent queries over different tables should produce the same fingerprint
         fp_a = fingerprint(
@@ -953,6 +954,21 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
             catalog="cat",
         )
         self.assertEqual(fp.sql(), "SELECT _t0._c0 AS _c0 FROM cat.mydb.x AS _t0")
+
+        # UNION BY NAME: different column-name sets must produce different fingerprints
+        # (two branches share no column name => NULL-padded) vs (both share "a" => unified)
+        schema_ux = {"x": {"a": "INT"}, "y": {"a": "INT", "b": "INT"}}
+        fp_match = fingerprint(
+            parse_one("SELECT a FROM x UNION BY NAME SELECT a FROM y", dialect="duckdb"),
+            schema=schema_ux,
+            dialect="duckdb",
+        ).sql(dialect="duckdb")
+        fp_diff = fingerprint(
+            parse_one("SELECT a FROM x UNION BY NAME SELECT b FROM y", dialect="duckdb"),
+            schema=schema_ux,
+            dialect="duckdb",
+        ).sql(dialect="duckdb")
+        self.assertNotEqual(fp_match, fp_diff)
 
     def test_canonicalize(self):
         optimize = partial(
