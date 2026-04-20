@@ -932,7 +932,11 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
     def test_fingerprint(self):
         from sqlglot.optimizer.fingerprint import fingerprint
 
-        schema = {**self.schema, "jtbl": {"j": "JSON"}}
+        schema = {
+            **self.schema,
+            "jtbl": {"j": "JSON"},
+            "pvt": {"c": "TEXT", "v": "INT"},
+        }
         self.check_file("fingerprint", fingerprint, schema=schema)
 
         # Structurally equivalent queries over different tables should produce the same fingerprint

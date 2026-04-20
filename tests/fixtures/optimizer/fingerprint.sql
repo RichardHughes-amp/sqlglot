@@ -212,3 +212,8 @@ SELECT _t0._c1 AS _c1, _c2 AS _c2 FROM _t0 AS _t0 CROSS JOIN UNNEST(_t0._c0) AS 
 # dialect: postgres
 SELECT * FROM generate_series(1, 10) AS g(n);
 SELECT _t0._c0 AS _c0 FROM GENERATE_SERIES(1, 10) AS _t0(_c0);
+
+# title: pivot with user alias, alias is canonicalized but output column names (from IN literals) are preserved
+# dialect: bigquery
+SELECT my_pivot.x FROM pvt PIVOT(SUM(v) FOR c IN ('x')) AS my_pivot;
+SELECT _t1.x AS x FROM _t0 AS _t0 PIVOT(SUM(_t0._c0) FOR _t0._c1 IN ('x')) AS _t1;

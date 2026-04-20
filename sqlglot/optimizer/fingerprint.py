@@ -165,6 +165,26 @@ def fingerprint(
                     if isinstance(offset_id, exp.Identifier) and offset_id.name in name_map:
                         _canon(offset_id, name_map[offset_id.name])
 
+        # PIVOTs attach to a Table rather than being a source in scope.sources, but their
+        # alias acts as a table qualifier for column references like `my_pivot.x`.
+        # Only the alias is canonicalized — the pivot output column names are bound to
+        # the IN-clause literals (e.g. IN ('x') produces a column literally named `x`),
+        # so renaming them would break the query.
+        for pivot in scope.pivots:
+            pivot_alias = pivot.args.get("alias")
+            if not (pivot_alias and isinstance(pivot_alias.this, exp.Identifier)):
+                continue
+            pivot_cols = columns_by_source.get(pivot_alias.this.name)
+            if not pivot_cols:
+                continue
+
+            canon_t = next_table()
+            _canon(pivot_alias.this, canon_t)
+            for col in pivot_cols:
+                table_id = col.args.get("table")
+                if table_id:
+                    _canon(table_id, canon_t)
+
         # Rewrite Table nodes (real tables and CTE/subquery references in FROM)
         for table in scope.tables:
             canon = table_map.get(table.alias_or_name)
