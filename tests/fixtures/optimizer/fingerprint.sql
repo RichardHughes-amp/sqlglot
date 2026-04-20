@@ -128,3 +128,87 @@ SELECT JSON_EXTRACT(_t0._c0, '$.field') AS _c1 FROM _t0 AS _t0;
 # dialect: postgres
 SELECT j -> 'field' FROM jtbl;
 SELECT _t0._c0 -> 'field' AS _c1 FROM _t0 AS _t0;
+
+# title: select star except, excluded columns are dropped before canonicalization
+# dialect: duckdb
+SELECT * EXCEPT (a) FROM x;
+SELECT _t0._c0 AS _c0 FROM _t0 AS _t0;
+
+# title: select star replace, replacement expression is canonicalized
+# dialect: bigquery
+SELECT * REPLACE (a + 1 AS a) FROM x;
+SELECT _t0._c0 + 1 AS _c2, _t0._c1 AS _c1 FROM _t0 AS _t0;
+
+# title: select star rename, aliases are canonicalized so rename target is erased
+# dialect: snowflake
+SELECT * RENAME (a AS new_a) FROM x;
+SELECT _t0._c0 AS _c0, _t0._c1 AS _c1 FROM _t0 AS _t0;
+
+# title: values clause with column aliases, alias and column names are canonicalized
+SELECT t.i, t.s FROM (VALUES (1, 'a'), (2, 'b')) AS t(i, s);
+SELECT _t0._c0 AS _c0, _t0._c1 AS _c1 FROM (VALUES (1, 'a'), (2, 'b')) AS _t0(_c0, _c1);
+
+# title: lateral subquery alias is canonicalized, outer table shared with lateral body
+# dialect: postgres
+SELECT x.a, t.b FROM x, LATERAL (SELECT x.a + 1 AS b) AS t;
+SELECT _t0._c1 AS _c1, _t1._c2 AS _c2 FROM _t0 AS _t0, LATERAL (SELECT _t0._c1 + 1 AS _c0) AS _t1;
+
+# title: window function with partition and order
+SELECT a, ROW_NUMBER() OVER (PARTITION BY a ORDER BY b) AS rn FROM x;
+SELECT _t0._c0 AS _c0, ROW_NUMBER() OVER (PARTITION BY _t0._c0 ORDER BY _t0._c1) AS _c2 FROM _t0 AS _t0;
+
+# title: qualify clause with window function
+# dialect: bigquery
+SELECT a, b FROM x QUALIFY ROW_NUMBER() OVER (PARTITION BY a ORDER BY b) = 1;
+SELECT _t0._c0 AS _c0, _t0._c1 AS _c1 FROM _t0 AS _t0 QUALIFY ROW_NUMBER() OVER (PARTITION BY _t0._c0 ORDER BY _t0._c1) = 1;
+
+# title: scalar subquery in select
+SELECT x.a, (SELECT MAX(y.c) FROM y) AS m FROM x;
+SELECT _t1._c2 AS _c2, (SELECT MAX(_t0._c0) AS _c1 FROM _t0 AS _t0) AS _c3 FROM _t1 AS _t1;
+
+# title: distinct on
+# dialect: postgres
+SELECT DISTINCT ON (a) a, b FROM x;
+SELECT DISTINCT ON (_c0) _t0._c0 AS _c0, _t0._c1 AS _c1 FROM _t0 AS _t0;
+
+# title: join using is expanded to on with coalesce
+SELECT * FROM x JOIN y USING (b);
+SELECT _t0._c0 AS _c0, COALESCE(_t0._c1, _t1._c2) AS _c4, _t1._c3 AS _c3 FROM _t0 AS _t0 JOIN _t1 AS _t1 ON _t0._c1 = _t1._c2;
+
+# title: chained union
+SELECT a FROM x UNION SELECT b FROM y UNION SELECT c FROM z;
+SELECT _t0._c0 AS _c0 FROM _t0 AS _t0 UNION SELECT _t1._c1 AS _c1 FROM _t1 AS _t1 UNION SELECT _t2._c2 AS _c2 FROM _t2 AS _t2;
+
+# title: filter clause on aggregate
+SELECT SUM(a) FILTER (WHERE b > 0) FROM x;
+SELECT SUM(_t0._c0) FILTER(WHERE _t0._c1 > 0) AS _c2 FROM _t0 AS _t0;
+
+# title: left semi join, right side columns are canonicalized even when not selected
+# dialect: spark
+SELECT a FROM x LEFT SEMI JOIN y ON x.b = y.b;
+SELECT _t0._c0 AS _c0 FROM _t0 AS _t0 LEFT SEMI JOIN _t1 AS _t1 ON _t0._c1 = _t1._c2;
+
+# title: array constructor in select
+# dialect: duckdb
+SELECT [a, b] FROM x;
+SELECT [_t0._c0, _t0._c1] AS _c2 FROM _t0 AS _t0;
+
+# title: recursive cte, self-reference and definition share the same canonical name
+# validate_qualify_columns: false
+WITH RECURSIVE cte AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM cte WHERE n < 5) SELECT * FROM cte;
+WITH RECURSIVE _t0 AS (SELECT 1 AS _c0 UNION ALL SELECT _t0._c0 + 1 AS _c1 FROM _t0 AS _t0 WHERE _t0._c0 < 5) SELECT _t0._c0 AS _c0 FROM _t0 AS _t0;
+
+# title: bigquery unnest with offset, both primary and offset pseudo-columns are canonicalized
+# dialect: bigquery
+SELECT n, off FROM UNNEST([10, 20, 30]) AS n WITH OFFSET AS off;
+SELECT _c0 AS _c0, _c1 AS _c1 FROM UNNEST([10, 20, 30]) AS _c0 WITH OFFSET AS _c1;
+
+# title: bigquery correlated unnest, outer table shared with unnest expression
+# dialect: bigquery
+SELECT t.id, u FROM t CROSS JOIN UNNEST(t.arr) AS u;
+SELECT _t0._c1 AS _c1, _c2 AS _c2 FROM _t0 AS _t0 CROSS JOIN UNNEST(_t0._c0) AS _c2;
+
+# title: table valued function with column alias, column name is canonicalized
+# dialect: postgres
+SELECT * FROM generate_series(1, 10) AS g(n);
+SELECT _t0._c0 AS _c0 FROM GENERATE_SERIES(1, 10) AS _t0(_c0);

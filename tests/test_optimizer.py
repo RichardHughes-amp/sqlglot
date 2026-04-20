@@ -970,6 +970,41 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
         ).sql(dialect="duckdb")
         self.assertNotEqual(fp_match, fp_diff)
 
+        # Case-folding semantics: in case-insensitive dialects (e.g. postgres, lowercase-folding)
+        # unquoted `a` and quoted `"a"` refer to the same column and must match.
+        pg_schema = {"x": {"a": "INT", "b": "INT"}}
+        fp_pg_a = fingerprint(
+            parse_one("SELECT a FROM x", dialect="postgres"), schema=pg_schema, dialect="postgres"
+        ).sql(dialect="postgres")
+        fp_pg_qa = fingerprint(
+            parse_one('SELECT "a" FROM x', dialect="postgres"), schema=pg_schema, dialect="postgres"
+        ).sql(dialect="postgres")
+        self.assertEqual(fp_pg_a, fp_pg_qa)
+
+        # In Snowflake (upper-folding), unquoted `a` becomes `A`, while quoted `"a"` stays
+        # lowercase. When both appear in the same query they must canonicalize to *different*
+        # columns — `_c0` and `_c1`.
+        sf_schema = {"X": {"A": "INT", '"a"': "INT"}}
+        fp_sf = fingerprint(
+            parse_one('SELECT a, "a" FROM x', dialect="snowflake"),
+            schema=sf_schema,
+            dialect="snowflake",
+        ).sql(dialect="snowflake")
+        self.assertEqual(
+            fp_sf,
+            "SELECT _t0._c0 AS _c0, _t0._c1 AS _c1 FROM _t0 AS _t0",
+        )
+
+        # But unquoted `A` and quoted `"A"` reference the same column — they must coalesce
+        # to the same canonical name.
+        sf_schema2 = {"X": {"A": "INT"}}
+        fp_sf2 = fingerprint(
+            parse_one('SELECT A, "A" FROM x', dialect="snowflake"),
+            schema=sf_schema2,
+            dialect="snowflake",
+        ).sql(dialect="snowflake")
+        self.assertEqual(fp_sf2, "SELECT _t0._c0 AS _c0, _t0._c0 AS _c0 FROM _t0 AS _t0")
+
     def test_canonicalize(self):
         optimize = partial(
             optimizer.optimize,
