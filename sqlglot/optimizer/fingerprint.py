@@ -31,14 +31,24 @@ def fingerprint(
         >>> import sqlglot
         >>> schema = {"src": {"c1": "INT", "c2": "INT"}}
         >>> fingerprint(sqlglot.parse_one("WITH t AS (SELECT c1, c2 FROM c.db.src) SELECT * FROM t"), schema=schema).sql()
-        'WITH "_t1" AS (SELECT "_t0"."c1" AS "c1", "_t0"."c2" AS "c2" FROM "c"."db"."src" AS "_t0") SELECT "_t1"."c1" AS "c1", "_t1"."c2" AS "c2" FROM "_t1" AS "_t1"'
+        'WITH "_t1" AS (SELECT "_t0"."c1" AS "_c0", "_t0"."c2" AS "_c1" FROM "c"."db"."src" AS "_t0") SELECT "_t1"."_c0" AS "c1", "_t1"."_c1" AS "c2" FROM "_t1" AS "_t1"'
     """
     expression = t.cast("E", qualify(expression, dialect=dialect, schema=schema, **qualify_kwargs))
 
-    # Top-level output scope: its aliases are the query's data contract
-    output_scope_expr: exp.Expr = expression
-    while isinstance(output_scope_expr, exp.SetOperation):
-        output_scope_expr = output_scope_expr.left.unnest()
+    # Top-level output scopes: their aliases are the query's data contract.
+    # Regular UNION takes names from the left branch; UNION BY NAME takes names
+    # from the union of all branches, so both sides of a by_name SetOperation
+    # contribute.
+    output_scope_exprs: set[int] = set()
+    stack: list[exp.Expr] = [expression]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, exp.SetOperation):
+            stack.append(node.left.unnest())
+            if node.args.get("by_name"):
+                stack.append(node.right.unnest())
+        else:
+            output_scope_exprs.add(id(node))
 
     next_table = name_sequence("_t")
     next_column = name_sequence("_c")
@@ -55,11 +65,13 @@ def fingerprint(
 
     for scope in traverse_scope(expression):
         scope_expr = scope.expression
-        is_output_scope = scope_expr is output_scope_expr
+        is_output_scope = id(scope_expr) in output_scope_exprs
 
-        columns_by_source: dict[str, list[exp.Column]] = {}
+        columns_by_source: dict[str, list[exp.Column | exp.TableColumn]] = {}
         for col in scope.columns:
             columns_by_source.setdefault(col.table, []).append(col)
+        for table_col in scope.table_columns:
+            columns_by_source.setdefault(table_col.name, []).append(table_col)
 
         table_map: dict[str, str] = {}
 
@@ -113,8 +125,14 @@ def fingerprint(
 
             table_map[source_name] = canon_t
 
-            for col in source_cols:
-                old_name = col.name
+            for src_col in source_cols:
+                # BigQuery whole-row struct ref (`SELECT t FROM t`): the identifier
+                # IS the table alias, so rename it to the canonical table name.
+                if isinstance(src_col, exp.TableColumn):
+                    _canon(src_col.this, canon_t)
+                    continue
+
+                old_name = src_col.name
                 canon_col = name_map.get(old_name)
 
                 if canon_col is None:
@@ -129,9 +147,9 @@ def fingerprint(
                 # Scope-sourced column refs are internal handles pointing at CTE/subquery aliases (injected unquoted
                 # via exp.to_identifier); they must match, so _canon
                 if not is_base_source:
-                    _canon(col.this, canon_col)
+                    _canon(src_col.this, canon_col)
 
-                table_id = col.args.get("table")
+                table_id = src_col.args.get("table")
                 if table_id:
                     _canon(table_id, canon_t)
 
@@ -168,8 +186,8 @@ def fingerprint(
             canon_t = next_table()
             _canon(pivot_alias.this, canon_t)
 
-            for col in pivot_cols:
-                table_id = col.args.get("table")
+            for pivot_col in pivot_cols:
+                table_id = pivot_col.args.get("table")
                 if table_id:
                     _canon(table_id, canon_t)
 
@@ -202,19 +220,24 @@ def fingerprint(
             for sel in scope_expr.selects:
                 if isinstance(sel, exp.Alias):
                     old_alias = sel.alias
-                    inner = sel.this
                     if is_output_scope:
                         new_name = old_alias
-                    elif isinstance(inner, exp.Column):
-                        new_name = inner.name
-                        sel.set("alias", exp.to_identifier(new_name, quoted=inner.this.quoted))
                     else:
                         new_name = next_column()
                         sel.set("alias", exp.to_identifier(new_name, quoted=True))
 
                     output_map[old_alias] = new_name
         elif isinstance(scope_expr, exp.SetOperation) and scope.union_scopes:
+            # Regular UNION names come from the left branch. UNION BY NAME folds
+            # in right-branch names too (any column unique to the right still
+            # appears in the output).
             output_map = scope_outputs.get(id(scope.union_scopes[0].expression), {}).copy()
+            if scope_expr.args.get("by_name"):
+                right_out = scope_outputs.get(id(scope.union_scopes[1].expression), {})
+                for k, v in right_out.items():
+                    output_map.setdefault(k, v)
+        elif scope.is_udtf and scope.subquery_scopes:
+            output_map = scope_outputs.get(id(scope.subquery_scopes[0].expression), {}).copy()
 
         scope_outputs[id(scope_expr)] = output_map
 
@@ -223,10 +246,11 @@ def fingerprint(
             if not col.table and col.name in output_map:
                 _canon(col.this, output_map[col.name])
 
-        # UNION BY NAME matches columns across branches by original alias, so canonical
-        # names must align — otherwise `... UNION BY NAME SELECT a ...` and
-        # `... UNION BY NAME SELECT b ...` fingerprint identically despite reading
-        # different columns from the right side.
+        # UBN matches branches by original alias. When both branches are internal
+        # and aliased to distinct _cN, matching originals land on different slots
+        # and UBN splits them into disjoint output columns, dropping data. Align
+        # the right branch's canonicals to the left's. No-op when both branches
+        # preserved their aliases (top-level UBN).
         if isinstance(scope_expr, exp.SetOperation) and scope_expr.args.get("by_name"):
             left_scope, right_scope = scope.union_scopes
             left_out = scope_outputs.get(id(left_scope.expression), {})
@@ -239,23 +263,23 @@ def fingerprint(
                     rename[right_canon] = left_canon
 
             if rename:
-
-                def _apply_rename(node: exp.Expr) -> None:
+                rename_stack: list[exp.Expr] = [right_scope.expression]
+                while rename_stack:
+                    node = rename_stack.pop()
                     if isinstance(node, exp.SetOperation):
-                        _apply_rename(node.left)
-                        _apply_rename(node.right)
-                        return
-                    if isinstance(node, exp.Select):
-                        for sel in node.selects:
-                            if isinstance(sel, exp.Alias):
-                                aid = sel.args.get("alias")
-                                if isinstance(aid, exp.Identifier) and aid.name in rename:
-                                    _canon(aid, rename[aid.name])
-                        for col in find_all_in_scope(node, exp.Column):
-                            if not col.table and col.name in rename:
-                                _canon(col.this, rename[col.name])
-
-                _apply_rename(right_scope.expression)
+                        rename_stack.append(node.left)
+                        rename_stack.append(node.right)
+                        continue
+                    if not isinstance(node, exp.Select):
+                        continue
+                    for sel in node.selects:
+                        if isinstance(sel, exp.Alias):
+                            aid = sel.args.get("alias")
+                            if isinstance(aid, exp.Identifier) and aid.name in rename:
+                                _canon(aid, rename[aid.name])
+                    for col in find_all_in_scope(node, exp.Column):
+                        if not col.table and col.name in rename:
+                            _canon(col.this, rename[col.name])
 
                 scope_outputs[id(right_scope.expression)] = {
                     k: rename.get(v, v) for k, v in right_out.items()

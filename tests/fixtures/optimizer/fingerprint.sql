@@ -16,11 +16,11 @@ SELECT "_t0"."a" AS "a", "_t0"."b" AS "b" FROM "c"."db"."x" AS "_t0";
 
 # title: single cte
 WITH t AS (SELECT a, b FROM x) SELECT * FROM t;
-WITH "_t1" AS (SELECT "_t0"."a" AS "a", "_t0"."b" AS "b" FROM "c"."db"."x" AS "_t0") SELECT "_t1"."a" AS "a", "_t1"."b" AS "b" FROM "_t1" AS "_t1";
+WITH "_t1" AS (SELECT "_t0"."a" AS "_c0", "_t0"."b" AS "_c1" FROM "c"."db"."x" AS "_t0") SELECT "_t1"."_c0" AS "a", "_t1"."_c1" AS "b" FROM "_t1" AS "_t1";
 
 # title: multi cte
 WITH t1 AS (SELECT a FROM x), t2 AS (SELECT b FROM y) SELECT t1.a, t2.b FROM t1 JOIN t2 ON t1.a = t2.b;
-WITH "_t2" AS (SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0"), "_t3" AS (SELECT "_t1"."b" AS "b" FROM "c"."db"."y" AS "_t1") SELECT "_t2"."a" AS "a", "_t3"."b" AS "b" FROM "_t2" AS "_t2" JOIN "_t3" AS "_t3" ON "_t2"."a" = "_t3"."b";
+WITH "_t2" AS (SELECT "_t0"."a" AS "_c0" FROM "c"."db"."x" AS "_t0"), "_t3" AS (SELECT "_t1"."b" AS "_c1" FROM "c"."db"."y" AS "_t1") SELECT "_t2"."_c0" AS "a", "_t3"."_c1" AS "b" FROM "_t2" AS "_t2" JOIN "_t3" AS "_t3" ON "_t2"."_c0" = "_t3"."_c1";
 
 # title: cross join
 SELECT x.a, y.c FROM x CROSS JOIN y;
@@ -36,19 +36,19 @@ SELECT "_t0"."a" AS "a", "_t1"."b" AS "b" FROM "c"."db"."x" AS "_t0" JOIN "c"."d
 
 # title: subquery in from
 SELECT t.a FROM (SELECT a FROM x) AS t;
-SELECT "_t1"."a" AS "a" FROM (SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0") AS "_t1";
+SELECT "_t1"."_c0" AS "a" FROM (SELECT "_t0"."a" AS "_c0" FROM "c"."db"."x" AS "_t0") AS "_t1";
 
 # title: subquery with column aliases, user-declared aliases on the subquery are internal handles
 SELECT t.p, t.q FROM (SELECT a, b FROM x) AS t(p, q);
-SELECT "_t1"."a" AS "p", "_t1"."b" AS "q" FROM (SELECT "_t0"."a" AS "a", "_t0"."b" AS "b" FROM "c"."db"."x" AS "_t0") AS "_t1";
+SELECT "_t1"."_c0" AS "p", "_t1"."_c1" AS "q" FROM (SELECT "_t0"."a" AS "_c0", "_t0"."b" AS "_c1" FROM "c"."db"."x" AS "_t0") AS "_t1";
 
 # title: nested subqueries
 SELECT t.a FROM (SELECT t.a FROM (SELECT a FROM x) AS t) AS t;
-SELECT "_t2"."a" AS "a" FROM (SELECT "_t1"."a" AS "a" FROM (SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0") AS "_t1") AS "_t2";
+SELECT "_t2"."_c1" AS "a" FROM (SELECT "_t1"."_c0" AS "_c1" FROM (SELECT "_t0"."a" AS "_c0" FROM "c"."db"."x" AS "_t0") AS "_t1") AS "_t2";
 
 # title: uncorrelated subquery
 SELECT a FROM x WHERE b IN (SELECT b FROM y);
-SELECT "_t1"."a" AS "a" FROM "c"."db"."x" AS "_t1" WHERE "_t1"."b" IN (SELECT "_t0"."b" AS "b" FROM "c"."db"."y" AS "_t0");
+SELECT "_t1"."a" AS "a" FROM "c"."db"."x" AS "_t1" WHERE "_t1"."b" IN (SELECT "_t0"."b" AS "_c0" FROM "c"."db"."y" AS "_t0");
 
 # title: correlated subquery
 SELECT a FROM x WHERE EXISTS (SELECT 1 FROM y WHERE y.b = x.b);
@@ -80,7 +80,7 @@ SELECT "_t0"."a" AS "a", "_t0"."b" AS "b", COUNT(*) AS "_col_2" FROM "c"."db"."x
 
 # title: union
 SELECT a FROM x UNION SELECT b FROM y;
-SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0" UNION SELECT "_t1"."b" AS "b" FROM "c"."db"."y" AS "_t1";
+SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0" UNION SELECT "_t1"."b" AS "_c0" FROM "c"."db"."y" AS "_t1";
 
 # title: union by name, matching column names unify to the same canonical name
 # dialect: duckdb
@@ -96,6 +96,11 @@ SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0" UNION BY NAME SELECT "_t1"."c
 # dialect: duckdb
 SELECT a + 1 AS shared FROM x UNION BY NAME (SELECT b AS shared FROM y UNION BY NAME SELECT c AS shared FROM z);
 SELECT "_t0"."a" + 1 AS "shared" FROM "c"."db"."x" AS "_t0" UNION BY NAME (SELECT "_t1"."b" AS "shared" FROM "c"."db"."y" AS "_t1" UNION BY NAME SELECT "_t2"."c" AS "shared" FROM "c"."db"."z" AS "_t2");
+
+# title: union by name inside a CTE, right branch's internal _cN is aligned with the left's so UBN merges correctly
+# dialect: duckdb
+WITH t AS (SELECT a AS k FROM x UNION BY NAME SELECT b AS k FROM y) SELECT k FROM t;
+WITH "_t2" AS (SELECT "_t0"."a" AS "_c0" FROM "c"."db"."x" AS "_t0" UNION BY NAME SELECT "_t1"."b" AS "_c0" FROM "c"."db"."y" AS "_t1") SELECT "_t2"."_c0" AS "k" FROM "_t2" AS "_t2";
 
 # title: case when
 SELECT CASE WHEN a > 0 THEN b ELSE a END FROM x;
@@ -156,7 +161,7 @@ SELECT "_t0"."_c0" AS "i", "_t0"."_c1" AS "s" FROM (VALUES (1, 'a'), (2, 'b')) A
 # title: lateral subquery alias is canonicalized, outer table shared with lateral body
 # dialect: postgres
 SELECT x.a, t.b FROM x, LATERAL (SELECT x.a + 1 AS b) AS t;
-SELECT "_t0"."a" AS "a", "_t1"."_c1" AS "b" FROM "c"."db"."x" AS "_t0", LATERAL (SELECT "_t0"."a" + 1 AS "_c0") AS "_t1";
+SELECT "_t0"."a" AS "a", "_t1"."_c0" AS "b" FROM "c"."db"."x" AS "_t0", LATERAL (SELECT "_t0"."a" + 1 AS "_c0") AS "_t1";
 
 # title: window function with partition and order
 SELECT a, ROW_NUMBER() OVER (PARTITION BY a ORDER BY b) AS rn FROM x;
@@ -182,7 +187,7 @@ SELECT "_t0"."a" AS "a", COALESCE("_t0"."b", "_t1"."b") AS "b", "_t1"."c" AS "c"
 
 # title: chained union
 SELECT a FROM x UNION SELECT b FROM y UNION SELECT c FROM z;
-SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0" UNION SELECT "_t1"."b" AS "b" FROM "c"."db"."y" AS "_t1" UNION SELECT "_t2"."c" AS "c" FROM "c"."db"."z" AS "_t2";
+SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0" UNION SELECT "_t1"."b" AS "_c0" FROM "c"."db"."y" AS "_t1" UNION SELECT "_t2"."c" AS "_c1" FROM "c"."db"."z" AS "_t2";
 
 # title: filter clause on aggregate
 SELECT SUM(a) FILTER (WHERE b > 0) FROM x;
@@ -208,10 +213,16 @@ WITH RECURSIVE "_t0" AS (SELECT 1 AS "_c0" UNION ALL SELECT "_t0"."_c0" + 1 AS "
 SELECT n, off FROM UNNEST([10, 20, 30]) AS n WITH OFFSET AS off;
 SELECT `_c0` AS `n`, `_c1` AS `off` FROM UNNEST([10, 20, 30]) AS `_c0` WITH OFFSET AS `_c1`;
 
+
 # title: bigquery correlated unnest, outer table shared with unnest expression
 # dialect: bigquery
 SELECT t.id, u FROM t CROSS JOIN UNNEST(t.arr) AS u;
 SELECT `_t0`.`id` AS `id`, `_c0` AS `u` FROM `c`.`db`.`t` AS `_t0` CROSS JOIN UNNEST(`_t0`.`arr`) AS `_c0`;
+
+# title: bigquery whole-row struct selection — TableColumn follows the table's canonical name, output alias preserves the row-struct's contract name
+# dialect: bigquery
+SELECT t FROM t;
+SELECT `_t0` AS `t` FROM `c`.`db`.`t` AS `_t0`;
 
 # title: table valued function with column alias, base-table-style column name is preserved
 # dialect: postgres
@@ -223,30 +234,18 @@ SELECT "_t0"."n" AS "n" FROM GENERATE_SERIES(1, 10) AS "_t0"("n");
 SELECT my_pivot.x FROM pvt PIVOT(SUM(v) FOR c IN ('x')) AS my_pivot;
 SELECT `_t1`.`x` AS `x` FROM `c`.`db`.`pvt` AS `_t0` PIVOT(SUM(`_t0`.`v`) FOR `_t0`.`c` IN ('x')) AS `_t1`;
 
-# title: data contract - base-table column rename is caught
-SELECT a FROM x;
-SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0";
-
-# title: data contract - renaming a base column in a CTE + its outer reference produces a different fingerprint
-WITH t AS (SELECT a, b FROM x) SELECT b FROM t;
-WITH "_t1" AS (SELECT "_t0"."a" AS "a", "_t0"."b" AS "b" FROM "c"."db"."x" AS "_t0") SELECT "_t1"."b" AS "b" FROM "_t1" AS "_t1";
-
-# title: data contract - internal CTE alias rename is invisible when top-level name is held constant
+# title: CTE-level user alias on a pass-through column is replaced with _cN, outer preserves the user-facing alias
 WITH t AS (SELECT a AS foo FROM x) SELECT foo FROM t;
-WITH "_t1" AS (SELECT "_t0"."a" AS "a" FROM "c"."db"."x" AS "_t0") SELECT "_t1"."a" AS "foo" FROM "_t1" AS "_t1";
+WITH "_t1" AS (SELECT "_t0"."a" AS "_c0" FROM "c"."db"."x" AS "_t0") SELECT "_t1"."_c0" AS "foo" FROM "_t1" AS "_t1";
 
-# title: data contract - top-level alias on an expression is preserved
+# title: top-level user-provided alias on an expression stays as-is
 SELECT a + 1 AS total FROM x;
 SELECT "_t0"."a" + 1 AS "total" FROM "c"."db"."x" AS "_t0";
 
-# title: data contract - CTE-level alias on an expression is internal (gets _cN)
+# title: CTE-level user alias on an expression is replaced with _cN, outer preserves the user-facing alias
 WITH t AS (SELECT a + 1 AS total FROM x) SELECT total FROM t;
 WITH "_t1" AS (SELECT "_t0"."a" + 1 AS "_c0" FROM "c"."db"."x" AS "_t0") SELECT "_t1"."_c0" AS "total" FROM "_t1" AS "_t1";
 
-# title: data contract - top-level alias rename changes the contract and is detected
-SELECT a AS alpha FROM x;
-SELECT "_t0"."a" AS "alpha" FROM "c"."db"."x" AS "_t0";
-
-# title: order by in an internal scope referencing an alias canonicalized to _cN
+# title: ORDER BY reference to a CTE-level alias follows the alias's _cN canonicalization
 WITH t AS (SELECT a + 1 AS total FROM x ORDER BY total) SELECT total FROM t;
 WITH "_t1" AS (SELECT "_t0"."a" + 1 AS "_c0" FROM "c"."db"."x" AS "_t0" ORDER BY "_c0") SELECT "_t1"."_c0" AS "total" FROM "_t1" AS "_t1";
