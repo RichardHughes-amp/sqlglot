@@ -10,6 +10,7 @@ import sqlglot
 from sqlglot import exp, optimizer, parse_one
 from sqlglot.errors import ANSI_RESET, ANSI_UNDERLINE, OptimizeError, SchemaError
 from sqlglot.optimizer.annotate_types import annotate_types
+from sqlglot.optimizer.fingerprint import fingerprint
 from sqlglot.optimizer.normalize import normalization_distance
 from sqlglot.optimizer.scope import build_scope, traverse_scope, walk_in_scope
 from sqlglot.schema import MappingSchema
@@ -930,34 +931,89 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
         self.check_file("eliminate_subqueries", optimizer.eliminate_subqueries.eliminate_subqueries)
 
     def test_fingerprint(self):
-        from sqlglot.optimizer.fingerprint import fingerprint
-
         schema = {
             **self.schema,
             "jtbl": {"j": "JSON"},
             "pvt": {"c": "TEXT", "v": "INT"},
         }
-        self.check_file("fingerprint", fingerprint, schema=schema)
+        self.check_file("fingerprint", fingerprint, schema=schema, catalog="c", db="db")
 
-        # Structurally equivalent queries over different tables should produce the same fingerprint
+        # Physical table identity is part of the data contract: reading the same columns
+        # from a different table is a real change and must produce a different fingerprint.
+        # (Tables are assumed to be qualified with catalog.db.table; an unqualified table
+        # name is treated as an internal handle and canonicalized, like a CTE reference.)
         fp_a = fingerprint(
-            parse_one("SELECT id, name FROM users WHERE id > 5"),
-            schema={"users": {"id": "INT", "name": "TEXT"}},
+            parse_one("SELECT id, name FROM cat.db.users WHERE id > 5"),
+            schema={"cat": {"db": {"users": {"id": "INT", "name": "TEXT"}}}},
         )
-        fp_b = fingerprint(
-            parse_one("SELECT emp_id, full_name FROM employees WHERE emp_id > 5"),
-            schema={"employees": {"emp_id": "INT", "full_name": "TEXT"}},
+        fp_diff_table = fingerprint(
+            parse_one("SELECT id, name FROM cat.db.employees WHERE id > 5"),
+            schema={"cat": {"db": {"employees": {"id": "INT", "name": "TEXT"}}}},
         )
-        self.assertEqual(fp_a.sql(), fp_b.sql())
+        self.assertNotEqual(fp_a.sql(), fp_diff_table.sql())
 
-        # Physical table identity is preserved for real tables (only alias is canonicalized)
+        # Renaming a base-table column is likewise a data-contract change and must be
+        # detected even when everything else about the query shape is identical.
+        fp_rename = fingerprint(
+            parse_one("SELECT emp_id, full_name FROM cat.db.users WHERE emp_id > 5"),
+            schema={"cat": {"db": {"users": {"emp_id": "INT", "full_name": "TEXT"}}}},
+        )
+        self.assertNotEqual(fp_a.sql(), fp_rename.sql())
+
+        # User-chosen table alias is an internal handle with no semantic effect — the same
+        # query with a different alias produces the same fingerprint.
+        fp_alias_a = fingerprint(
+            parse_one("SELECT foo.id FROM users AS foo"),
+            schema={"users": {"id": "INT"}},
+        )
+        fp_alias_b = fingerprint(
+            parse_one("SELECT bar.id FROM users AS bar"),
+            schema={"users": {"id": "INT"}},
+        )
+        self.assertEqual(fp_alias_a.sql(), fp_alias_b.sql())
+
+        # Physical table identity is preserved for real tables (only the alias is
+        # canonicalized); base-table column names and top-level output aliases are
+        # preserved because they're part of the query's outward data contract.
         fp = fingerprint(
             parse_one("SELECT a FROM x"),
             schema={"x": {"a": "INT"}},
             db="mydb",
             catalog="cat",
         )
-        self.assertEqual(fp.sql(), "SELECT _t0._c0 AS _c0 FROM cat.mydb.x AS _t0")
+        self.assertEqual(fp.sql(), 'SELECT "_t0"."a" AS "a" FROM "cat"."mydb"."x" AS "_t0"')
+
+        # Top-level output alias is part of the contract — renaming it changes the
+        # fingerprint even though the underlying data is identical.
+        fp_named = fingerprint(parse_one("SELECT a AS alpha FROM x"), schema={"x": {"a": "INT"}})
+        fp_renamed = fingerprint(parse_one("SELECT a AS beta FROM x"), schema={"x": {"a": "INT"}})
+        self.assertNotEqual(fp_named.sql(), fp_renamed.sql())
+
+        # Internal alias inside a CTE is self-consistent (the outer query must use the
+        # same name for the rename to be valid SQL), so renaming it with the top-level
+        # contract name held constant must not change the fingerprint.
+        fp_inner_a = fingerprint(
+            parse_one("WITH t AS (SELECT a AS foo FROM x) SELECT foo AS result FROM t"),
+            schema={"x": {"a": "INT"}},
+        )
+        fp_inner_b = fingerprint(
+            parse_one("WITH t AS (SELECT a AS bar FROM x) SELECT bar AS result FROM t"),
+            schema={"x": {"a": "INT"}},
+        )
+        self.assertEqual(fp_inner_a.sql(), fp_inner_b.sql())
+
+        # Changing which base-table column a CTE reads must be detected as a real
+        # change even when the outer query is byte-for-byte identical (the CTE
+        # internally aliases the column so the outer reference name doesn't move).
+        fp_cte_col_a = fingerprint(
+            parse_one("WITH t AS (SELECT a AS x FROM src) SELECT x FROM t"),
+            schema={"src": {"a": "INT", "b": "INT"}},
+        )
+        fp_cte_col_b = fingerprint(
+            parse_one("WITH t AS (SELECT b AS x FROM src) SELECT x FROM t"),
+            schema={"src": {"a": "INT", "b": "INT"}},
+        )
+        self.assertNotEqual(fp_cte_col_a.sql(), fp_cte_col_b.sql())
 
         # UNION BY NAME: different column-name sets must produce different fingerprints
         # (two branches share no column name => NULL-padded) vs (both share "a" => unified)
@@ -974,6 +1030,33 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
         ).sql(dialect="duckdb")
         self.assertNotEqual(fp_match, fp_diff)
 
+        # UNION BY NAME with a nested rhs: swapping the source column inside the nested
+        # branch must still be caught as a data-contract change.
+        schema_nested = {
+            "x": {"a": "INT"},
+            "y": {"b": "INT"},
+            "z": {"c": "INT", "d": "INT"},
+        }
+        fp_nested_a = fingerprint(
+            parse_one(
+                "SELECT a + 1 AS shared FROM x UNION BY NAME "
+                "(SELECT b AS shared FROM y UNION BY NAME SELECT c AS shared FROM z)",
+                dialect="duckdb",
+            ),
+            schema=schema_nested,
+            dialect="duckdb",
+        ).sql(dialect="duckdb")
+        fp_nested_b = fingerprint(
+            parse_one(
+                "SELECT a + 1 AS shared FROM x UNION BY NAME "
+                "(SELECT b AS shared FROM y UNION BY NAME SELECT d AS shared FROM z)",
+                dialect="duckdb",
+            ),
+            schema=schema_nested,
+            dialect="duckdb",
+        ).sql(dialect="duckdb")
+        self.assertNotEqual(fp_nested_a, fp_nested_b)
+
         # Case-folding semantics: in case-insensitive dialects (e.g. postgres, lowercase-folding)
         # unquoted `a` and quoted `"a"` refer to the same column and must match.
         pg_schema = {"x": {"a": "INT", "b": "INT"}}
@@ -986,8 +1069,9 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
         self.assertEqual(fp_pg_a, fp_pg_qa)
 
         # In Snowflake (upper-folding), unquoted `a` becomes `A`, while quoted `"a"` stays
-        # lowercase. When both appear in the same query they must canonicalize to *different*
-        # columns — `_c0` and `_c1`.
+        # lowercase — they reference *different* columns. Base-table names are preserved,
+        # and the quote state on the lowercase column is retained because dropping it
+        # would let Snowflake re-case-fold `a` back to `A` (changing semantics).
         sf_schema = {"X": {"A": "INT", '"a"': "INT"}}
         fp_sf = fingerprint(
             parse_one('SELECT a, "a" FROM x', dialect="snowflake"),
@@ -996,18 +1080,18 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
         ).sql(dialect="snowflake")
         self.assertEqual(
             fp_sf,
-            "SELECT _t0._c0 AS _c0, _t0._c1 AS _c1 FROM _t0 AS _t0",
+            'SELECT "_t0"."A" AS "A", "_t0"."a" AS "a" FROM "_t0" AS "_t0"',
         )
 
         # But unquoted `A` and quoted `"A"` reference the same column — they must coalesce
-        # to the same canonical name.
+        # to the same canonical form.
         sf_schema2 = {"X": {"A": "INT"}}
         fp_sf2 = fingerprint(
             parse_one('SELECT A, "A" FROM x', dialect="snowflake"),
             schema=sf_schema2,
             dialect="snowflake",
         ).sql(dialect="snowflake")
-        self.assertEqual(fp_sf2, "SELECT _t0._c0 AS _c0, _t0._c0 AS _c0 FROM _t0 AS _t0")
+        self.assertEqual(fp_sf2, 'SELECT "_t0"."A" AS "A", "_t0"."A" AS "A" FROM "_t0" AS "_t0"')
 
     def test_canonicalize(self):
         optimize = partial(
